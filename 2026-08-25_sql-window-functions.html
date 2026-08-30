@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SQL Window Functions — Study Notes (2026-08-25)</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif; max-width: 820px; margin: 40px auto; padding: 0 20px; line-height: 1.55; color: #1a1a1a; }
+  h1 { color: #1F4E79; border-bottom: 3px solid #1F4E79; padding-bottom: 10px; }
+  h2 { color: #1F4E79; margin-top: 40px; border-left: 4px solid #1F4E79; padding-left: 10px; }
+  h3 { color: #333; margin-top: 24px; }
+  code { font-family: Consolas, Menlo, monospace; background: #f2f2f2; padding: 2px 5px; border-radius: 3px; color: #9c2b00; font-size: 0.92em; }
+  pre { background: #f2f2f2; padding: 12px 16px; border-radius: 6px; overflow-x: auto; border-left: 3px solid #1F4E79; }
+  pre code { background: none; padding: 0; color: #1a1a1a; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+  th, td { border: 1px solid #ccc; padding: 8px 12px; text-align: left; }
+  th { background: #1F4E79; color: #fff; }
+  .note { background: #fff8e1; border-left: 4px solid #f5a623; padding: 10px 16px; margin: 16px 0; }
+  .status { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.85em; }
+  .status.covered { background: #d4edda; color: #155724; }
+  .status.pending { background: #eee; color: #666; }
+  #meta { font-size: 0.9em; color: #555; }
+  ul { padding-left: 22px; }
+</style>
+</head>
+<body>
+
+<!--
+CLAUDE-CONTEXT (for future study sessions):
+This file is a personal study log. It records what the user has already
+learned and how far they got, so a future assistant (e.g. Claude Code)
+can pick up where the session left off without re-teaching covered material.
+Topics marked "pending" in the roadmap were mentioned but NOT yet taught.
+Use topics_covered / topics_pending as ground truth for what to quiz or
+teach next.
+-->
+<script type="application/json" id="claude-context">
+{
+  "subject": "SQL - Window Functions",
+  "session_date": "2026-08-25",
+  "learner_level": "solid basic/intermediate SQL, learning advanced topics",
+  "roadmap": [
+    "Window functions",
+    "CTEs / recursion",
+    "Indexing & query plans",
+    "Transactions / isolation levels",
+    "Advanced joins & set operations"
+  ],
+  "topics_covered": [
+    "PARTITION BY concept",
+    "Ranking functions: ROW_NUMBER, RANK, DENSE_RANK",
+    "Offset functions: LAG, LEAD (incl. default/offset args)",
+    "Aggregate functions as windows (running totals, rolling averages)",
+    "Distribution functions: NTILE, PERCENT_RANK, FIRST_VALUE, LAST_VALUE",
+    "Frame clause: default frame behavior and why it breaks LAST_VALUE"
+  ],
+  "topics_pending": [
+    "CTEs and recursive queries",
+    "Indexing & query plans",
+    "Transactions & isolation levels",
+    "Advanced joins & set operations",
+    "RANGE vs ROWS vs GROUPS framing (mentioned, not yet explained)"
+  ]
+}
+</script>
+
+<h1>SQL Window Functions</h1>
+<p id="meta">2026-08-25 &nbsp;|&nbsp; Topic 1 of 5: Window Functions → CTEs/Recursion → Indexing/Query Plans → Transactions/Isolation → Joins/Set Ops</p>
+
+<h2>PARTITION BY</h2>
+<p><code>GROUP BY</code> without collapsing rows — every row stays, annotated with its group value.</p>
+<pre><code>AVG(salary) OVER (PARTITION BY department) AS dept_avg</code></pre>
+
+<h2>Ranking Functions</h2>
+<table>
+<tr><th>Function</th><th>Ties</th></tr>
+<tr><td><code>ROW_NUMBER()</code></td><td>Always unique: 1,2,3,4…</td></tr>
+<tr><td><code>RANK()</code></td><td>Shared rank, gaps after: 1,2,2,4</td></tr>
+<tr><td><code>DENSE_RANK()</code></td><td>Shared rank, no gaps: 1,2,2,3</td></tr>
+</table>
+<pre><code>ROW_NUMBER() OVER (ORDER BY score DESC) AS rn
+RANK()       OVER (ORDER BY score DESC) AS rnk
+DENSE_RANK() OVER (ORDER BY score DESC) AS drnk</code></pre>
+
+<h2>Offset — LAG / LEAD</h2>
+<p>Value from another row, per the <code>ORDER BY</code> in <code>OVER()</code>. <code>LAG</code> = previous, <code>LEAD</code> = next.</p>
+<pre><code>LAG(revenue) OVER (ORDER BY date) AS prev_day
+LAG(revenue, 7, 0)  -- 7 rows back, default 0 if none</code></pre>
+
+<h2>Aggregates as Windows</h2>
+<p><code>SUM</code>/<code>AVG</code>/etc., non-collapsing. Pair with a frame for running totals or rolling averages.</p>
+<pre><code>SUM(revenue) OVER (ORDER BY date) AS running_total
+AVG(revenue) OVER (
+  ORDER BY date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+) AS rolling_7day_avg</code></pre>
+
+<h2>Distribution Functions</h2>
+<ul>
+  <li><code>NTILE(4)</code> — splits rows into 4 equal buckets (quartiles)</li>
+  <li><code>PERCENT_RANK()</code> — relative rank as a fraction (0–1)</li>
+  <li><code>FIRST_VALUE()</code> / <code>LAST_VALUE()</code> — first/last in the window frame</li>
+</ul>
+<pre><code>FIRST_VALUE(employee) OVER (
+  PARTITION BY department ORDER BY salary DESC
+  ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+) AS top_earner</code></pre>
+
+<h2>Frame Clause — Why It's Needed</h2>
+<p>Default frame when <code>ORDER BY</code> is used: <code>RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW</code> — start of partition through the <em>current row only</em>, not the whole partition.</p>
+<p><strong>Breaks <code>LAST_VALUE()</code>:</strong> its frame ends at the current row, so "last value" = the row's own value, every time. <code>FIRST_VALUE()</code> is unaffected since the first row never changes.</p>
+<p><strong>Fix:</strong> <code>ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING</code> — spans the full partition.</p>
+<div class="note">
+<strong>Rule of thumb:</strong> default frame → correct for running/rolling calcs. Fixed reference point (e.g. "top earner") → override the frame, or use <code>MAX()</code>/<code>MIN()</code> instead.
+</div>
+
+<h2>Up Next <span class="status pending">not yet covered</span></h2>
+<ul>
+  <li><code>RANGE</code> vs <code>ROWS</code> vs <code>GROUPS</code> framing (matters with duplicate ORDER BY values)</li>
+  <li>CTEs &amp; recursive queries</li>
+  <li>Indexing &amp; query plans</li>
+  <li>Transactions &amp; isolation levels</li>
+  <li>Advanced joins &amp; set operations</li>
+</ul>
+
+</body>
+</html>
