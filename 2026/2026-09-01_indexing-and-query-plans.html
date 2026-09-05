@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Indexing &amp; Query Plans — Study Notes (2026-09-01)</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif; max-width: 820px; margin: 40px auto; padding: 0 20px; line-height: 1.55; color: #1a1a1a; }
+  h1 { color: #1F4E79; border-bottom: 3px solid #1F4E79; padding-bottom: 10px; }
+  h2 { color: #1F4E79; margin-top: 40px; border-left: 4px solid #1F4E79; padding-left: 10px; }
+  h3 { color: #333; margin-top: 24px; }
+  code { font-family: Consolas, Menlo, monospace; background: #f2f2f2; padding: 2px 5px; border-radius: 3px; color: #9c2b00; font-size: 0.92em; }
+  pre { background: #f2f2f2; padding: 12px 16px; border-radius: 6px; overflow-x: auto; border-left: 3px solid #1F4E79; }
+  pre code { background: none; padding: 0; color: #1a1a1a; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+  th, td { border: 1px solid #ccc; padding: 8px 12px; text-align: left; }
+  th { background: #1F4E79; color: #fff; }
+  .note { background: #fff8e1; border-left: 4px solid #f5a623; padding: 10px 16px; margin: 16px 0; }
+  .status { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.85em; }
+  .status.pending { background: #eee; color: #666; }
+  #meta { font-size: 0.9em; color: #555; }
+  ul { padding-left: 22px; }
+</style>
+</head>
+<body>
+
+<!--
+CLAUDE-CONTEXT (for future study sessions):
+This file is a personal study log. It records what the user has already
+learned so a future assistant (e.g. Claude Code) can pick up where the
+session left off without re-teaching covered material. Topics in
+topics_pending were mentioned but NOT yet taught — treat topics_covered
+and topics_pending as ground truth for what to quiz or teach next.
+-->
+<script type="application/json" id="claude-context">
+{
+  "subject": "SQL - Indexing & Query Plans",
+  "session_date": "2026-09-01",
+  "learner_level": "solid basic/intermediate SQL, learning advanced topics",
+  "roadmap": [
+    "Window functions",
+    "CTEs / recursion",
+    "Indexing & query plans",
+    "Transactions / isolation levels",
+    "Advanced joins & set operations"
+  ],
+  "topics_covered": [
+    "Why indexes exist: a B-tree structure gives O(log n) lookup vs. an O(n) full table scan",
+    "Reading a query plan with EXPLAIN ANALYZE: Seq Scan vs. Index Scan vs. Index Only Scan",
+    "Composite indexes follow a leftmost-prefix rule — column order determines which queries can use them",
+    "Cases where an index won't help: wrapping the column in a function, a leading wildcard search, low-selectivity columns",
+    "Clustered index (physical row order, one per table) vs. non-clustered index (separate lookup structure + pointer, many per table)",
+    "Covering indexes: include every column a query needs so it never has to trip back to the table (Index Only Scan)",
+    "Pros/cons and use cases for clustered vs. non-clustered indexes"
+  ],
+  "topics_pending": [
+    "RANGE vs ROWS vs GROUPS framing (carried over from window functions)",
+    "Transactions & isolation levels",
+    "Advanced joins & set operations"
+  ]
+}
+</script>
+
+<h1>Indexing &amp; Query Plans</h1>
+<p id="meta">2026-09-01 &nbsp;|&nbsp; Topic 3 of 5: Window Functions ✓ → CTEs/Recursion ✓ → Indexing/Query Plans (today) → Transactions/Isolation → Joins/Set Ops</p>
+
+<h2>Why Indexes Exist</h2>
+<p>An index is a sorted B-tree structure that lets the database jump to matching rows instead of scanning every row.</p>
+<pre><code>CREATE INDEX idx_users_email ON users(email);
+-- WHERE email = 'x@y.com' now binary-searches (O(log n)) instead of scanning (O(n))</code></pre>
+<div class="note">
+<strong>Not free:</strong> every INSERT/UPDATE/DELETE has to update every index on the table too, and each index costs disk space — indexing everything slows down writes.
+</div>
+
+<h2>Reading a Query Plan</h2>
+<p><code>EXPLAIN ANALYZE</code> shows whether the database actually used an index.</p>
+<pre><code>EXPLAIN ANALYZE
+SELECT * FROM users WHERE email = 'x@y.com';</code></pre>
+<table>
+<tr><th>Plan node</th><th>Meaning</th></tr>
+<tr><td>Seq Scan / Table Scan</td><td>No index used — full scan (bad on large tables)</td></tr>
+<tr><td>Index Scan</td><td>Uses the index to find rows, then fetches them</td></tr>
+<tr><td>Index Only Scan</td><td>Everything needed is in the index — no trip to the table</td></tr>
+</table>
+
+<h2>Composite Indexes — Order Matters</h2>
+<p>An index on <code>(last_name, first_name)</code> supports a leftmost-prefix query — not a query on <code>first_name</code> alone.</p>
+<pre><code>CREATE INDEX idx_name ON users(last_name, first_name);
+
+-- Uses the index:
+WHERE last_name = 'Smith'
+WHERE last_name = 'Smith' AND first_name = 'Jane'
+
+-- Does NOT use it:
+WHERE first_name = 'Jane'</code></pre>
+
+<h2>When an Index Won't Help</h2>
+<ul>
+  <li>Wrapping the column in a function: <code>WHERE UPPER(email) = 'X'</code> (unless a matching functional index exists)</li>
+  <li>Leading wildcard search: <code>LIKE '%smith'</code> (trailing wildcard <code>'smith%'</code> is fine)</li>
+  <li>Low-selectivity columns (e.g. a boolean <code>is_active</code> — half the table matches either way, so the optimizer may just scan)</li>
+</ul>
+
+<h2>Clustered vs. Non-Clustered Indexes</h2>
+<p>Clustered = the physical row order on disk (one per table). Non-clustered = a separate structure with a pointer back to the row (many per table).</p>
+<pre><code>-- Clustered (often the PK) — table rows physically sorted by id
+-- Non-clustered — separate lookup structure
+CREATE INDEX idx_email ON users(email);  -- non-clustered</code></pre>
+<p>A non-clustered lookup needs a second trip (a "bookmark"/"key" lookup) from the index entry back to the row — still far better than a full scan, but slower than clustered.</p>
+
+<table>
+<tr><th></th><th>Clustered</th><th>Non-Clustered</th></tr>
+<tr><td>Pros</td><td>Fastest range/by-key lookup (data is sorted in place); no extra storage structure</td><td>Many per table; cheaper to create/rebuild; narrower, fits more in cache</td></tr>
+<tr><td>Cons</td><td>Only one per table; expensive inserts if the key isn't sequential (page splits on random UUIDs); rebuild reorders the whole table</td><td>Extra "bookmark lookup" trip for large result sets (unless covering); extra storage; every write maintains it</td></tr>
+<tr><td>Use cases</td><td>PK/auto-increment lookups, range queries (<code>date BETWEEN ...</code>), append-only log tables</td><td>Any filter/join column that isn't the clustering key; multiple access patterns; unique constraints that aren't the PK</td></tr>
+</table>
+
+<h2>Covering Indexes</h2>
+<p>Includes every column the query needs, so there's no second trip to the table — this is what "Index Only Scan" means.</p>
+<pre><code>-- Non-covering: index only has last_name, still fetches email/signup_date from the table
+CREATE INDEX idx_name ON users(last_name);
+
+-- Covering: everything the query needs is in the index
+CREATE INDEX idx_name_covering ON users(last_name) INCLUDE (email, signup_date);
+-- (Postgres/SQL Server syntax — MySQL: just add the columns to the composite index)</code></pre>
+<div class="note">
+<strong>Rule of thumb:</strong> cluster on whatever column drives your main range/sequential access pattern (often an auto-incrementing PK); add non-clustered indexes for other filter/sort columns; reserve covering indexes for hot, frequently-run queries — wider index = more disk space and slower writes, same tradeoff as any index.
+</div>
+
+<h2>Up Next <span class="status pending">not yet covered</span></h2>
+<ul>
+  <li><code>RANGE</code> vs <code>ROWS</code> vs <code>GROUPS</code> framing (carried over from window functions)</li>
+  <li>Transactions &amp; isolation levels</li>
+  <li>Advanced joins &amp; set operations</li>
+</ul>
+
+</body>
+</html>

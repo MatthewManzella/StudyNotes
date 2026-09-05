@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Transactions &amp; Isolation Levels — Study Notes (2026-09-03)</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif; max-width: 820px; margin: 40px auto; padding: 0 20px; line-height: 1.55; color: #1a1a1a; }
+  h1 { color: #1F4E79; border-bottom: 3px solid #1F4E79; padding-bottom: 10px; }
+  h2 { color: #1F4E79; margin-top: 40px; border-left: 4px solid #1F4E79; padding-left: 10px; }
+  h3 { color: #333; margin-top: 24px; }
+  code { font-family: Consolas, Menlo, monospace; background: #f2f2f2; padding: 2px 5px; border-radius: 3px; color: #9c2b00; font-size: 0.92em; }
+  pre { background: #f2f2f2; padding: 12px 16px; border-radius: 6px; overflow-x: auto; border-left: 3px solid #1F4E79; }
+  pre code { background: none; padding: 0; color: #1a1a1a; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+  th, td { border: 1px solid #ccc; padding: 8px 12px; text-align: left; }
+  th { background: #1F4E79; color: #fff; }
+  .note { background: #fff8e1; border-left: 4px solid #f5a623; padding: 10px 16px; margin: 16px 0; }
+  .status { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.85em; }
+  .status.pending { background: #eee; color: #666; }
+  #meta { font-size: 0.9em; color: #555; }
+  ul { padding-left: 22px; }
+</style>
+</head>
+<body>
+
+<!--
+CLAUDE-CONTEXT (for future study sessions):
+This file is a personal study log. It records what the user has already
+learned so a future assistant (e.g. Claude Code) can pick up where the
+session left off without re-teaching covered material. Topics in
+topics_pending were mentioned but NOT yet taught — treat topics_covered
+and topics_pending as ground truth for what to quiz or teach next.
+-->
+<script type="application/json" id="claude-context">
+{
+  "subject": "SQL - Transactions & Isolation Levels",
+  "session_date": "2026-09-03",
+  "learner_level": "solid basic/intermediate SQL, learning advanced topics",
+  "roadmap": [
+    "Window functions",
+    "CTEs / recursion",
+    "Indexing & query plans",
+    "Transactions / isolation levels",
+    "Advanced joins & set operations"
+  ],
+  "topics_covered": [
+    "Transactions & ACID: atomicity, consistency, isolation, durability",
+    "Concurrency phenomena: dirty read, non-repeatable read, phantom read",
+    "The four isolation levels and which phenomena each prevents; per-engine defaults (Read Committed vs. MySQL/InnoDB's Repeatable Read)",
+    "Pessimistic locking (SELECT ... FOR UPDATE) vs. optimistic locking (version/timestamp column)",
+    "Why not always Serializable: abort-and-retry cost, lower throughput under concurrency, most weak-isolation bugs don't matter for the use case",
+    "Declaring locks: FOR UPDATE, FOR SHARE, FOR NO KEY UPDATE, FOR KEY SHARE, table-level locks, optimistic version-column updates",
+    "Isolation level vs. explicit locking: isolation level is the transaction-wide default; a lock is a targeted, row-level override for a read-then-write sequence the isolation level alone doesn't protect",
+    "Serializable's cost differs by engine: lock-based engines (SQL Server, MySQL/InnoDB) lock under the hood; Postgres (SSI) lets transactions run and aborts one on conflict, so the app must retry",
+    "Folding a check-then-act sequence into one atomic statement avoids locking/escalation entirely (inventory decrement, view-count increment, unique-constraint insert)",
+    "SKIP LOCKED for concurrent job-queue workers: skip past a locked row instead of blocking on it",
+    "Lost updates: no isolation level merges concurrent writes to the same row; optimistic locking (a version column) detects the conflict and hands it back to the application"
+  ],
+  "topics_pending": [
+    "RANGE vs ROWS vs GROUPS framing (carried over from window functions)",
+    "Advanced joins & set operations"
+  ]
+}
+</script>
+
+<h1>Transactions &amp; Isolation Levels</h1>
+<p id="meta">2026-09-03 &nbsp;|&nbsp; Topic 4 of 5: Window Functions ✓ → CTEs/Recursion ✓ → Indexing/Query Plans ✓ → Transactions/Isolation (today) → Joins/Set Ops</p>
+
+<h2>Transactions &amp; ACID</h2>
+<p>A transaction groups statements into one atomic unit — everything happens, or nothing does.</p>
+<pre><code>BEGIN;
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+UPDATE accounts SET balance = balance + 100 WHERE id = 2;
+COMMIT;
+-- or ROLLBACK; if something went wrong</code></pre>
+<ul>
+  <li><strong>Atomicity</strong> — all statements succeed, or all roll back</li>
+  <li><strong>Consistency</strong> — the database moves between valid states (constraints/FKs stay intact)</li>
+  <li><strong>Isolation</strong> — concurrent transactions don't see each other's uncommitted changes (tunable)</li>
+  <li><strong>Durability</strong> — once committed, it survives a crash</li>
+</ul>
+
+<h2>Concurrency Phenomena</h2>
+<ul>
+  <li><strong>Dirty read</strong> — reading another transaction's uncommitted change; if it rolls back, you read data that never existed</li>
+  <li><strong>Non-repeatable read</strong> — re-reading the same row in one transaction gives a different value because another transaction committed a change in between</li>
+  <li><strong>Phantom read</strong> — re-running the same range query returns a different set of rows because another transaction inserted/deleted a matching row in between</li>
+</ul>
+
+<h2>Isolation Levels</h2>
+<table>
+<tr><th>Level</th><th>Dirty Read</th><th>Non-Repeatable Read</th><th>Phantom Read</th></tr>
+<tr><td>Read Uncommitted</td><td>Possible</td><td>Possible</td><td>Possible</td></tr>
+<tr><td>Read Committed</td><td>Prevented</td><td>Possible</td><td>Possible</td></tr>
+<tr><td>Repeatable Read</td><td>Prevented</td><td>Prevented</td><td>Possible</td></tr>
+<tr><td>Serializable</td><td>Prevented</td><td>Prevented</td><td>Prevented</td></tr>
+</table>
+<pre><code>SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+BEGIN;
+-- your queries here
+COMMIT;</code></pre>
+<div class="note">
+<strong>Defaults:</strong> Read Committed is the default in Postgres, SQL Server, Oracle. MySQL/InnoDB defaults to Repeatable Read — and its Repeatable Read is stronger than the SQL standard (prevents most phantoms via next-key locking), unlike Postgres's, which relies on snapshot isolation instead.
+</div>
+
+<h2>Locking, Briefly</h2>
+<ul>
+  <li><strong>Pessimistic locking</strong> — <code>SELECT ... FOR UPDATE</code> locks the row until commit; safe, but blocks others</li>
+  <li><strong>Optimistic locking</strong> — no lock; check a version/timestamp column at commit time and fail if it changed, then retry</li>
+</ul>
+
+<h2>Why Not Always Serializable</h2>
+<p>Serializable guarantees correctness but at real cost: it typically works by detecting conflicts and aborting one transaction, so the application needs retry logic; more isolation means more locking/abort-churn and lower throughput; and most weak-isolation bugs (a dirty read on a page-view counter, a phantom row in an hourly report) simply don't matter for the use case. Reserve it for operations where a race condition would cause real harm (double-spending, overselling inventory).</p>
+
+<h2>Declaring Locks</h2>
+<pre><code>-- Row-level pessimistic lock
+BEGIN;
+SELECT * FROM accounts WHERE id = 1 FOR UPDATE;
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+COMMIT;
+
+-- Postgres variants: FOR SHARE (shared — others can read/share-lock, not write),
+-- FOR NO KEY UPDATE, FOR KEY SHARE
+
+-- Table-level (rare, blunt, mostly maintenance)
+LOCK TABLE accounts IN EXCLUSIVE MODE;      -- Postgres
+LOCK TABLES accounts WRITE;                 -- MySQL
+
+-- Optimistic locking — no lock statement, version it yourself
+UPDATE accounts
+SET balance = balance - 100, version = version + 1
+WHERE id = 1 AND version = 5;
+-- 0 rows updated → someone else changed it first, retry in the app</code></pre>
+
+<h2>Isolation Level vs. Explicit Locking</h2>
+<p><strong>Isolation level</strong> = a transaction-wide guarantee about what you can see. <strong>Explicit locking</strong> = actively blocking other transactions from touching specific rows. Reach for an explicit lock when:</p>
+<ul>
+  <li>The isolation level only protects reads, not a read-then-act sequence on the same row (e.g. under Read Committed, "read stock → decide → write" has zero protection on its own)</li>
+  <li>You want blocking instead of Serializable's abort-and-retry behavior</li>
+  <li>You need row-level precision instead of escalating the whole transaction</li>
+  <li>Your engine's isolation level has a known gap (e.g. Postgres Repeatable Read doesn't fully prevent phantoms)</li>
+</ul>
+<div class="note">
+<strong>Lock flavor matters:</strong> <code>FOR UPDATE</code> is fully exclusive (blocks other readers' locks too); <code>FOR SHARE</code> blocks writers but lets other transactions hold their own shared lock concurrently. Use <code>FOR SHARE</code> when you need to block writes but still allow concurrent reads.
+</div>
+
+<h2>Serializable's Real Implementation Cost</h2>
+<p>Correctness-wise, Serializable guarantees transactions behave as if run one at a time — but "without locking" isn't quite true:</p>
+<ul>
+  <li><strong>Lock-based engines</strong> (SQL Server, MySQL/InnoDB) — implement it with locking under the hood (often range/next-key locks); you didn't write the lock, the engine did</li>
+  <li><strong>Postgres (SSI)</strong> — doesn't lock proactively; it tracks read/write dependencies and aborts one transaction with a serialization error if a conflict pattern appears — so the application must catch that error and retry, or the operation just silently doesn't happen</li>
+</ul>
+<pre><code>for attempt in range(3):
+    try:
+        run_transaction()
+        break
+    except SerializationFailure:
+        continue  # retry — without this, Serializable alone doesn't save you</code></pre>
+
+<h2>Fold Check-Then-Act Into One Atomic Statement</h2>
+<p>A cheaper alternative to locking/escalating isolation: collapse "read → decide → write" into a single indivisible statement, so there's no window for another transaction to interleave. Works under plain Read Committed, no lock needed.</p>
+<pre><code>-- Inventory decrement — 0 rows affected means already sold out
+UPDATE inventory
+SET stock = stock - 1
+WHERE product_id = 5 AND stock >= 1;
+
+-- View counter — the engine locks the row for the instant the atomic UPDATE takes
+UPDATE posts SET view_count = view_count + 1 WHERE id = 5;
+
+-- Seat booking — a UNIQUE constraint makes the insert itself the check
+CREATE UNIQUE INDEX idx_unique_seat ON reservations(seat_id);
+INSERT INTO reservations (seat_id, customer_id) VALUES ('14B', 42);
+-- a second concurrent attempt for the same seat fails with a unique-violation error</code></pre>
+<div class="note">
+<strong>Rule of thumb:</strong> this only works when the whole check-then-act collapses into one statement — but when it fits, it's cheaper than locking or escalating isolation. Note <code>FOR UPDATE</code>/<code>FOR SHARE</code> can't help the seat-booking case at all: those locks only work on rows that already exist, and the seat row doesn't exist yet before the first insert.
+</div>
+
+<h2>SKIP LOCKED for Job Queues</h2>
+<p>Multiple workers racing for "the oldest pending job" with plain <code>FOR UPDATE</code> queue up waiting on each other — correct, but kills the parallelism you wanted. <code>SKIP LOCKED</code> lets a worker skip a locked row and grab the next available one instead.</p>
+<pre><code>-- Problem: workers block on each other's lock
+SELECT id FROM jobs WHERE status = 'pending'
+ORDER BY created_at LIMIT 1 FOR UPDATE;
+
+-- Fix: skip locked rows, no waiting, no double-grab
+SELECT id FROM jobs WHERE status = 'pending'
+ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED;</code></pre>
+
+<h2>Lost Updates</h2>
+<p>No isolation level merges conflicting writes — isolation controls visibility and ordering, not content merging. If two users edit the same document and the second save is a plain <code>UPDATE</code>, the first user's changes are just silently overwritten.</p>
+<pre><code>-- A read the doc at version 7; check it's still version 7 before saving:
+UPDATE documents
+SET content = '<A''s edit>', version = version + 1
+WHERE id = 5 AND version = 7;
+-- 0 rows updated → someone else (B) saved first and bumped the version
+-- → the app must show a conflict/merge screen, not silently overwrite</code></pre>
+<div class="note">
+<strong>Rule of thumb:</strong> a database can <em>detect</em> a lost-update conflict (via a version column) and hand it back to the application, but it can't resolve it — real merging requires application logic or a different model entirely (e.g. CRDTs/operational transforms in collaborative editors).
+</div>
+
+<h2>Up Next <span class="status pending">not yet covered</span></h2>
+<ul>
+  <li><code>RANGE</code> vs <code>ROWS</code> vs <code>GROUPS</code> framing (carried over from window functions)</li>
+  <li>Advanced joins &amp; set operations</li>
+</ul>
+
+</body>
+</html>
