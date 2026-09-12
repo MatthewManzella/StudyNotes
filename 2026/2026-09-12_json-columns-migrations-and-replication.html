@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>JSON Columns, Migrations &amp; Replication — Study Notes (2026-09-12)</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif; max-width: 820px; margin: 40px auto; padding: 0 20px; line-height: 1.55; color: #1a1a1a; }
+  h1 { color: #1F4E79; border-bottom: 3px solid #1F4E79; padding-bottom: 10px; }
+  h2 { color: #1F4E79; margin-top: 40px; border-left: 4px solid #1F4E79; padding-left: 10px; }
+  h3 { color: #333; margin-top: 24px; }
+  code { font-family: Consolas, Menlo, monospace; background: #f2f2f2; padding: 2px 5px; border-radius: 3px; color: #9c2b00; font-size: 0.92em; }
+  pre { background: #f2f2f2; padding: 12px 16px; border-radius: 6px; overflow-x: auto; border-left: 3px solid #1F4E79; }
+  pre code { background: none; padding: 0; color: #1a1a1a; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+  th, td { border: 1px solid #ccc; padding: 8px 12px; text-align: left; }
+  th { background: #1F4E79; color: #fff; }
+  .note { background: #fff8e1; border-left: 4px solid #f5a623; padding: 10px 16px; margin: 16px 0; }
+  .status { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.85em; }
+  .status.pending { background: #eee; color: #666; }
+  #meta { font-size: 0.9em; color: #555; }
+  ul { padding-left: 22px; }
+</style>
+</head>
+<body>
+
+<!--
+CLAUDE-CONTEXT (for future study sessions):
+This file is a personal study log. It records what the user has already
+learned so a future assistant (e.g. Claude Code) can pick up where the
+session left off without re-teaching covered material. Topics in
+topics_pending were mentioned but NOT yet taught — treat topics_covered
+and topics_pending as ground truth for what to quiz or teach next.
+-->
+<script type="application/json" id="claude-context">
+{
+  "subject": "SQL - JSON Columns, Schema Migrations, Locking & Replication",
+  "session_date": "2026-09-12",
+  "learner_level": "solid basic/intermediate SQL, learning advanced topics",
+  "roadmap": [],
+  "topics_covered": [
+    "JSON/JSONB columns — jsonb (parsed binary, indexable) preferred over json (exact text, re-parsed every read) unless preserving exact formatting/key order matters",
+    "Querying JSON — -> returns JSON (chain into nested objects), ->> returns text (use at the end for comparisons), #>> path shorthand for deep nesting, @> containment operator",
+    "Indexing JSON — a GIN index enables containment/existence operators (@>, ?, ?&, ?|); or index one specific expression path directly if that's the main query pattern",
+    "The JSON tradeoff — fine for the truly variable-shaped part of a row (metadata, settings, raw payloads); a field constantly filtered/joined/constrained on should become a real column instead",
+    "Safe schema migrations on large tables — Postgres 11+ made ADD COLUMN ... DEFAULT cheap (metadata-only, no full rewrite); adding NOT NULL still needs the NOT VALID + VALIDATE CONSTRAINT split to avoid a long exclusive lock; CREATE INDEX CONCURRENTLY avoids blocking writes during a build",
+    "General migration pattern — additive first (add column/index unconstrained, deploy, backfill in small batches), never combine add-column and backfill in one statement on a big table, check what the migration tool already handles",
+    "Postgres table lock modes — 8 levels from ACCESS SHARE (plain SELECT) to ACCESS EXCLUSIVE (blocks everything, including reads)",
+    "SHARE UPDATE EXCLUSIVE specifically — held by VACUUM, ANALYZE, CREATE INDEX CONCURRENTLY, VALIDATE CONSTRAINT; lets normal reads/writes continue, only blocks other DDL on the same table",
+    "Concurrent transactions on the same row — a write always blocks a conflicting concurrent write until commit/rollback; Read Committed re-reads and proceeds afterward, Repeatable Read/Serializable aborts with a serialization failure instead; under MVCC, reads never block writes and writes never block reads",
+    "Replication basics — a replica streams the primary's write-ahead log (WAL / binlog) and replays it; async by default, so a replica is always a slightly stale read regardless of the primary's isolation level; synchronous replication trades write latency for zero lag"
+  ],
+  "topics_pending": []
+}
+</script>
+
+<h1>JSON Columns, Migrations &amp; Replication</h1>
+<p id="meta">2026-09-12</p>
+
+<h2>JSON/JSONB Columns</h2>
+<p>Store semi-structured data in a column and query into it directly — useful when a field's shape varies row-to-row and doesn't justify its own tables.</p>
+<pre><code>CREATE TABLE events (
+  id serial PRIMARY KEY,
+  payload jsonb
+);
+INSERT INTO events (payload) VALUES
+  ('{"type": "click", "user": {"id": 42, "plan": "pro"}, "tags": ["a", "b"]}');</code></pre>
+<table>
+<tr><th>Type</th><th>Behavior</th></tr>
+<tr><td><code>json</code></td><td>Stores exact text, re-parses on every query</td></tr>
+<tr><td><code>jsonb</code></td><td>Stores parsed binary — faster to query, supports indexing (preferred default)</td></tr>
+</table>
+
+<h2>Querying &amp; Indexing JSON</h2>
+<pre><code>-- -> returns JSON (keep chaining into nested objects), ->> returns text
+SELECT payload -> 'user' ->> 'plan' FROM events;      -- returns: pro
+SELECT payload -> 'tags' -> 0 FROM events;             -- "a"
+SELECT payload #>> '{user,plan}' FROM events;          -- path shorthand
+
+-- @> containment: "does this JSON contain this structure?"
+SELECT * FROM events WHERE payload @> '{"user": {"plan": "pro"}}';
+
+-- GIN index needed for @>, ?, ?&, ?| to use an index at all
+CREATE INDEX idx_payload_gin ON events USING GIN (payload);
+-- or index one specific path if that's the main query pattern
+CREATE INDEX idx_payload_plan ON events ((payload -> 'user' ->> 'plan'));</code></pre>
+<div class="note">
+<strong>Rule of thumb:</strong> JSON for the truly variable-shaped part of a row (metadata, settings, raw API payloads); real columns for anything you query, filter, join, or constrain regularly — once buried in JSON, you lose foreign keys, type checking, and most query-planner optimization.
+</div>
+
+<h2>Safe Schema Migrations on Large Tables</h2>
+<p>Certain schema changes lock the table while they run — harmless on a small table, a production outage on a live one with millions of rows.</p>
+<pre><code>-- Adding a column with a default: Postgres 11+ stores it as metadata
+-- instead of rewriting every row, so this is now cheap. MySQL/older
+-- engines can still pay the full-rewrite cost.
+ALTER TABLE orders ADD COLUMN status text DEFAULT 'pending';
+
+-- Adding NOT NULL still locks + validates every row in one breath —
+-- split it instead:
+ALTER TABLE orders ADD CONSTRAINT status_not_null
+  CHECK (status IS NOT NULL) NOT VALID;      -- instant, no scan yet
+ALTER TABLE orders VALIDATE CONSTRAINT status_not_null;  -- scans, lighter lock
+
+-- Adding an index on a live table:
+CREATE INDEX CONCURRENTLY idx_orders_status ON orders(status);
+-- slower than a plain CREATE INDEX, but doesn't block reads/writes</code></pre>
+<p><strong>NOT VALID</strong> adds the rule now (fast) and enforces it on new writes immediately, but skips checking existing rows. <strong>VALIDATE CONSTRAINT</strong> is the second pass — scans existing rows and flips the constraint to validated, failing with the offending row if one violates it.</p>
+<div class="note">
+General pattern for risky migrations: add new columns/indexes unconstrained first, deploy, backfill in small batches (never one giant UPDATE), then add the constraint. Check what your migration tool (Rails, Django, pg-osc/gh-ost) already handles safely.
+</div>
+
+<h2>Postgres Table Lock Modes</h2>
+<table>
+<tr><th>Level</th><th>Mode</th><th>Blocks reads?</th><th>Blocks writes?</th></tr>
+<tr><td>1</td><td>ACCESS SHARE (plain SELECT)</td><td>No</td><td>No</td></tr>
+<tr><td>2</td><td>ROW SHARE (SELECT ... FOR UPDATE/SHARE)</td><td>No</td><td>No</td></tr>
+<tr><td>3</td><td>ROW EXCLUSIVE (INSERT/UPDATE/DELETE)</td><td>No</td><td>No</td></tr>
+<tr><td>4</td><td>SHARE UPDATE EXCLUSIVE (VACUUM, ANALYZE, CREATE INDEX CONCURRENTLY, VALIDATE CONSTRAINT)</td><td>No</td><td>No</td></tr>
+<tr><td>5</td><td>SHARE (plain CREATE INDEX)</td><td>No</td><td>Yes</td></tr>
+<tr><td>6</td><td>SHARE ROW EXCLUSIVE (CREATE TRIGGER, some ALTER TABLE)</td><td>No</td><td>Yes</td></tr>
+<tr><td>7</td><td>EXCLUSIVE</td><td>No</td><td>Yes</td></tr>
+<tr><td>8</td><td>ACCESS EXCLUSIVE (plain ADD CONSTRAINT/CREATE INDEX, DROP TABLE, TRUNCATE)</td><td>Yes</td><td>Yes</td></tr>
+</table>
+<div class="note">
+Level 4 or below is safe to run on a live table without the app noticing — that's the entire reason the <code>NOT VALID</code>/<code>VALIDATE CONSTRAINT</code> split and <code>CONCURRENTLY</code> exist: they trade a slower migration for zero visible impact. Level 5+ stalls writes; level 8 stalls reads too.
+</div>
+
+<h2>Concurrent Transactions on the Same Row</h2>
+<p>Different rows run fully in parallel. Same-row writes: every UPDATE/DELETE/INSERT implicitly locks the row it touches — a second concurrent write blocks until the first commits or rolls back.</p>
+<ul>
+  <li><strong>Read Committed</strong> — the blocked transaction wakes up, re-reads the now-committed value, and applies its update on top. No error, just a pause.</li>
+  <li><strong>Repeatable Read / Serializable</strong> — the blocked transaction's snapshot predates the commit, so it gets a serialization failure instead — abort and retry.</li>
+</ul>
+<p>Under MVCC (Postgres/MySQL), reads never block writes and writes never block reads — a reader just sees whatever snapshot its isolation level allows.</p>
+
+<h2>Replication Basics</h2>
+<p>A replica is a live copy fed continuously from the primary — for read scaling and failover/durability.</p>
+<pre><code>-- Postgres: check replication status from the primary
+SELECT client_addr, state, sent_lsn, replay_lsn,
+       sent_lsn - replay_lsn AS lag_bytes
+FROM pg_stat_replication;</code></pre>
+<p>The primary streams its write-ahead log (WAL in Postgres, binlog in MySQL) to each replica, which replays it. This is async by default — the primary doesn't wait for a replica to confirm before committing.</p>
+<table>
+<tr><th></th><th>Async (default)</th><th>Sync</th></tr>
+<tr><td>Write latency</td><td>Fast — doesn't wait</td><td>Slower — waits for replica ack</td></tr>
+<tr><td>Data loss risk on primary failure</td><td>Small window possible</td><td>None</td></tr>
+<tr><td>Replica staleness</td><td>Always possible</td><td>Not for the synchronous replica(s)</td></tr>
+</table>
+<div class="note">
+A replica is, by definition, always reading a slightly stale snapshot — no isolation level set on the primary changes that. Writing to the primary then immediately reading from a replica can read your own write as if it never happened. Common fixes: route reads-right-after-a-write back to the primary, use synchronous replication (Postgres: <code>synchronous_commit</code>), or alert on <code>lag_bytes</code>/lag time directly.
+</div>
+
+</body>
+</html>

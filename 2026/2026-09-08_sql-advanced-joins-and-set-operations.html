@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Advanced Joins &amp; Set Operations — Study Notes (2026-09-08)</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif; max-width: 820px; margin: 40px auto; padding: 0 20px; line-height: 1.55; color: #1a1a1a; }
+  h1 { color: #1F4E79; border-bottom: 3px solid #1F4E79; padding-bottom: 10px; }
+  h2 { color: #1F4E79; margin-top: 40px; border-left: 4px solid #1F4E79; padding-left: 10px; }
+  h3 { color: #333; margin-top: 24px; }
+  code { font-family: Consolas, Menlo, monospace; background: #f2f2f2; padding: 2px 5px; border-radius: 3px; color: #9c2b00; font-size: 0.92em; }
+  pre { background: #f2f2f2; padding: 12px 16px; border-radius: 6px; overflow-x: auto; border-left: 3px solid #1F4E79; }
+  pre code { background: none; padding: 0; color: #1a1a1a; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+  th, td { border: 1px solid #ccc; padding: 8px 12px; text-align: left; }
+  th { background: #1F4E79; color: #fff; }
+  .note { background: #fff8e1; border-left: 4px solid #f5a623; padding: 10px 16px; margin: 16px 0; }
+  .status { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.85em; }
+  .status.pending { background: #eee; color: #666; }
+  #meta { font-size: 0.9em; color: #555; }
+  ul { padding-left: 22px; }
+</style>
+</head>
+<body>
+
+<!--
+CLAUDE-CONTEXT (for future study sessions):
+This file is a personal study log. It records what the user has already
+learned so a future assistant (e.g. Claude Code) can pick up where the
+session left off without re-teaching covered material. Topics in
+topics_pending were mentioned but NOT yet taught — treat topics_covered
+and topics_pending as ground truth for what to quiz or teach next.
+-->
+<script type="application/json" id="claude-context">
+{
+  "subject": "SQL - Advanced Joins & Set Operations",
+  "session_date": "2026-09-08",
+  "learner_level": "solid basic/intermediate SQL, learning advanced topics",
+  "roadmap": [
+    "Window functions",
+    "CTEs / recursion",
+    "Indexing & query plans",
+    "Transactions / isolation levels",
+    "Advanced joins & set operations"
+  ],
+  "topics_covered": [
+    "Self joins — join a table to itself to compare rows within it (e.g. employee to manager), one level, no recursion",
+    "Anti-joins — find rows with no match: LEFT JOIN + IS NULL vs. NOT EXISTS (preferred — short-circuits on first match, avoids NOT IN's NULL-handling pitfalls)",
+    "Semi-joins — filter by existence only (EXISTS), no join columns returned and no duplicate-row risk; preferred over JOIN ... DISTINCT when only checking that a match exists",
+    "Set operations — UNION (dedupes via a distinct pass), UNION ALL (keeps duplicates, faster), INTERSECT (rows in both sides), EXCEPT/MINUS (rows in the first side but not the second)",
+    "Join algorithms the optimizer picks between — Nested Loop, Hash Join, Merge Join — visible in EXPLAIN ANALYZE output",
+    "Table statistics — ANALYZE (Postgres/MySQL) / UPDATE STATISTICS (SQL Server) refresh the optimizer's row-count/distribution estimates; run manually right after a bulk load since autovacuum/auto-update hasn't triggered yet",
+    "Forcing a specific join algorithm — per-engine overrides exist (Postgres session GUCs, SQL Server OPTION hints, MySQL/Oracle inline hints) but are meant for diagnosis, not permanent fixes"
+  ],
+  "topics_pending": [
+    "JSON/JSONB columns",
+    "Safe schema migrations on large tables",
+    "Replication basics",
+    "RANGE vs ROWS vs GROUPS framing (carried over from window functions)"
+  ]
+}
+</script>
+
+<h1>Advanced Joins &amp; Set Operations</h1>
+<p id="meta">2026-09-08 &nbsp;|&nbsp; Topic 5 of 5: Window Functions ✓ → CTEs/Recursion ✓ → Indexing/Query Plans ✓ → Transactions/Isolation ✓ → Joins/Set Ops (today)</p>
+
+<h2>Self Joins</h2>
+<p>Join a table to itself to compare rows within it — one level, no recursion needed.</p>
+<pre><code>SELECT e.name AS employee, m.name AS manager
+FROM employees e
+JOIN employees m ON e.manager_id = m.id;</code></pre>
+
+<h2>Anti-Joins &amp; Semi-Joins</h2>
+<p>Anti-join = "find rows with no match." Semi-join = "filter by existence, don't fetch the other table's columns."</p>
+<pre><code>-- Anti-join, pattern 1: LEFT JOIN + IS NULL
+SELECT c.* FROM customers c
+LEFT JOIN orders o ON o.customer_id = c.id
+WHERE o.id IS NULL;
+
+-- Anti-join, pattern 2: NOT EXISTS — often faster, clearer intent
+SELECT c.* FROM customers c
+WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id);
+
+-- Semi-join: filter by existence only, no join columns returned
+SELECT c.* FROM customers c
+WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id AND o.amount > 1000);</code></pre>
+<div class="note">
+<strong>Rule of thumb:</strong> prefer <code>NOT EXISTS</code> over a third option, <code>NOT IN</code>, which has NULL-handling gotchas in the subquery. Prefer a semi-join (<code>EXISTS</code>) over <code>JOIN ... DISTINCT</code> when you only care whether at least one match exists — it can't produce duplicate rows.
+</div>
+
+<h2>Set Operations</h2>
+<p>Combine full result sets (same column count/types), not just rows within a join.</p>
+<table>
+<tr><th>Operator</th><th>Behavior</th></tr>
+<tr><td><code>UNION</code></td><td>Rows from both sides, deduplicated (costs a distinct pass)</td></tr>
+<tr><td><code>UNION ALL</code></td><td>Rows from both sides, duplicates kept — faster</td></tr>
+<tr><td><code>INTERSECT</code></td><td>Only rows present in both sides</td></tr>
+<tr><td><code>EXCEPT</code> (<code>MINUS</code> in Oracle)</td><td>Rows in the first side but not the second</td></tr>
+</table>
+<div class="note">
+<strong>Rule of thumb:</strong> default to <code>UNION ALL</code> unless you specifically need deduplication — <code>UNION</code>'s automatic distinct pass is a real, often-forgotten performance cost.
+</div>
+
+<h2>Join Algorithms &amp; Execution Plans</h2>
+<p>The optimizer picks one of three join algorithms based on table sizes, indexes, and whether data is already sorted — visible in <code>EXPLAIN ANALYZE</code> as Nested Loop, Hash Join, or Merge Join.</p>
+<table>
+<tr><th>Algorithm</th><th>How it works</th><th>Best when</th></tr>
+<tr><td>Nested Loop</td><td>For each row in the outer table, scan the inner table for matches — O(n×m)</td><td>One side is small, or there's an index on the inner table's join column</td></tr>
+<tr><td>Hash Join</td><td>Build a hash table from the smaller side, probe it while scanning the larger side — O(n+m)</td><td>Large tables, no useful index (default choice); needs enough memory to hold the hash table</td></tr>
+<tr><td>Merge Join</td><td>Walk both sorted inputs in parallel like a zipper</td><td>Both sides are already sorted on the join column (e.g. via an index or ORDER BY)</td></tr>
+</table>
+<pre><code>EXPLAIN ANALYZE
+SELECT * FROM orders o JOIN customers c ON o.customer_id = c.id
+WHERE o.order_date > '2026-01-01';</code></pre>
+<div class="note">
+Seeing a Hash Join where fast index usage was expected often signals a missing index on the join column — or the table's small enough that a full scan + hash beat an index lookup. The optimizer's choice leans on table statistics, so stale stats after a bulk load are a classic, sneaky cause of a sudden bad plan.
+</div>
+
+<h2>Table Statistics</h2>
+<pre><code>-- Postgres
+ANALYZE orders;
+ANALYZE;  -- all tables
+
+-- MySQL
+ANALYZE TABLE orders;
+
+-- SQL Server
+UPDATE STATISTICS orders;</code></pre>
+<p>Postgres autovacuum and MySQL/SQL Server auto-update normally keep statistics fresh on their own. The one time to run it manually: right after a bulk load (a big <code>COPY</code>/<code>INSERT</code> all at once) — auto-triggers haven't fired yet and the optimizer is working off stale/empty stats.</p>
+
+<h2>Forcing a Join Algorithm</h2>
+<pre><code>-- Postgres: disable the algorithms you don't want (session-level, not per-query)
+SET enable_hashjoin = off;
+SET enable_mergejoin = off;
+-- ... run query, then reset:
+SET enable_hashjoin = on;
+SET enable_mergejoin = on;
+
+-- SQL Server: inline hint
+SELECT * FROM orders o JOIN customers c ON o.customer_id = c.id
+OPTION (LOOP JOIN);  -- or HASH JOIN, MERGE JOIN
+
+-- MySQL 8+ / Oracle: hints in a comment block
+SELECT /*+ NO_HASH_JOIN(o, c) */ * FROM orders o JOIN customers c ON o.customer_id = c.id;</code></pre>
+<div class="note">
+<strong>Rule of thumb:</strong> the optimizer's cost-based decision is usually right, and it re-evaluates as stats/volume change — a hardcoded hint doesn't. If it's picking a bad algorithm, ask why first (stale stats, missing index, genuinely small table) and fix that; reach for a hint only as a temporary diagnostic.
+</div>
+
+<h2>Up Next <span class="status pending">not yet covered</span></h2>
+<ul>
+  <li>JSON/JSONB columns</li>
+  <li>Safe schema migrations on large tables</li>
+  <li>Replication basics</li>
+  <li><code>RANGE</code> vs <code>ROWS</code> vs <code>GROUPS</code> framing (carried over from window functions)</li>
+</ul>
+
+</body>
+</html>
