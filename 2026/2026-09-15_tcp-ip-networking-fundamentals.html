@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>TCP/IP Networking Fundamentals — Study Notes (2026-09-15)</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif; max-width: 820px; margin: 40px auto; padding: 0 20px; line-height: 1.55; color: #1a1a1a; }
+  h1 { color: #1F4E79; border-bottom: 3px solid #1F4E79; padding-bottom: 10px; }
+  h2 { color: #1F4E79; margin-top: 40px; border-left: 4px solid #1F4E79; padding-left: 10px; }
+  h3 { color: #333; margin-top: 24px; }
+  code { font-family: Consolas, Menlo, monospace; background: #f2f2f2; padding: 2px 5px; border-radius: 3px; color: #9c2b00; font-size: 0.92em; }
+  pre { background: #f2f2f2; padding: 12px 16px; border-radius: 6px; overflow-x: auto; border-left: 3px solid #1F4E79; }
+  pre code { background: none; padding: 0; color: #1a1a1a; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+  th, td { border: 1px solid #ccc; padding: 8px 12px; text-align: left; }
+  th { background: #1F4E79; color: #fff; }
+  .note { background: #fff8e1; border-left: 4px solid #f5a623; padding: 10px 16px; margin: 16px 0; }
+  .status { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.85em; }
+  .status.pending { background: #eee; color: #666; }
+  #meta { font-size: 0.9em; color: #555; }
+  ul { padding-left: 22px; }
+</style>
+</head>
+<body>
+
+<!--
+CLAUDE-CONTEXT (for future study sessions):
+This file is a personal study log. It records what the user has already
+learned so a future assistant (e.g. Claude Code) can pick up where the
+session left off without re-teaching covered material. Topics in
+topics_pending were mentioned but NOT yet taught — treat topics_covered
+and topics_pending as ground truth for what to quiz or teach next.
+-->
+<script type="application/json" id="claude-context">
+{
+  "subject": "Computer Networking",
+  "session_date": "2026-09-15",
+  "learner_level": "unspecified",
+  "roadmap": ["TCP/IP", "HTTP", "TLS", "DNS", "REST vs gRPC", "WebSockets"],
+  "topics_covered": ["TCP/IP stack overview", "IP addressing and routing", "NAT", "TTL", "ports and sockets", "TCP three-way handshake", "sequence numbers and acknowledgments", "flow control (sliding window)", "congestion control", "UDP vs TCP tradeoffs"],
+  "topics_pending": ["HTTP", "TLS", "DNS", "REST vs gRPC", "WebSockets"]
+}
+</script>
+
+<h1>TCP/IP Networking Fundamentals</h1>
+<p id="meta">2026-09-15 &nbsp;|&nbsp; Layer 1 of 6 (TCP/IP) covered — 5 remaining</p>
+
+<h2>TCP/IP stack overview</h2>
+<p>Four layers, each wraps the layer above in its own header (encapsulation): Link → Internet (IP) → Transport (TCP/UDP) → Application (HTTP, DNS, TLS, gRPC).</p>
+<pre><code>Ethernet frame [ IP packet [ TCP segment [ HTTP data ] ] ]</code></pre>
+
+<h2>IP: addressing and routing</h2>
+<p>Every device gets an IP address; routers forward packets hop by hop. IP is "best effort" — no guarantee of arrival, order, or uniqueness.</p>
+<table>
+<tr><th>Version</th><th>Address space</th></tr>
+<tr><td>IPv4</td><td>~4.3 billion (essentially exhausted)</td></tr>
+<tr><td>IPv6</td><td>2^128 (not a practical concern)</td></tr>
+</table>
+<p>Public addresses are globally routable; private addresses (192.168.x.x, 10.x.x.x) are local-network only. <strong>NAT</strong> lets many devices share one public IP. <strong>TTL</strong> is decremented at each router hop and drops the packet at zero — prevents infinite loops, also what <code>traceroute</code> exploits to map a path.</p>
+
+<h2>Ports and sockets</h2>
+<p>A port (0–65535) routes traffic to a specific program on a machine. A socket is the tuple {source IP, source port, destination IP, destination port}.</p>
+<div class="note">Common well-known ports: 80 (HTTP), 443 (HTTPS), 53 (DNS), 22 (SSH).</div>
+
+<h2>TCP three-way handshake</h2>
+<p>Client and server agree on starting sequence numbers before any data flows.</p>
+<pre><code>Client → SYN
+Server → SYN-ACK
+Client → ACK
+(connection established)</code></pre>
+
+<h2>Sequence numbers and acknowledgments</h2>
+<p>Every byte is numbered; receiver ACKs "got everything through byte N." Missing ACK within timeout → sender retransmits. Numbering also lets the receiver reorder out-of-sequence packets.</p>
+
+<h2>Flow control (sliding window)</h2>
+<p>Receiver advertises a window size — max unacknowledged bytes it'll buffer — so a fast sender can't overwhelm a slow receiver.</p>
+
+<h2>Congestion control</h2>
+<p>Protects the network, not just the receiver: "slow start" ramps up sending rate while ACKs arrive cleanly, then cuts sharply on detected loss and ramps back up more conservatively.</p>
+<div class="note">This is why a transfer speeds up over the first second or two, and why one congested link slows down every connection sharing it.</div>
+
+<h2>UDP vs TCP</h2>
+<p>UDP skips the handshake, sequencing, retransmission, and windowing entirely — just sends the packet. Lower overhead, no reliability guarantee.</p>
+<table>
+<tr><th>Use case</th><th>Why UDP</th></tr>
+<tr><td>Video calls</td><td>A late retransmit is worse than a dropped frame</td></tr>
+<tr><td>DNS</td><td>Speed matters more than reliability; falls back to TCP only for large responses</td></tr>
+</table>
+
+<h2>Up Next <span class="status pending">not yet covered</span></h2>
+<ul>
+  <li>HTTP</li>
+  <li>TLS</li>
+  <li>DNS</li>
+  <li>REST vs gRPC</li>
+  <li>WebSockets</li>
+</ul>
+
+</body>
+</html>
