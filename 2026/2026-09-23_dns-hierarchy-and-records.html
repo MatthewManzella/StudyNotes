@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>DNS: Hierarchy, Records, and Name Servers — Study Notes (2026-09-23)</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif; max-width: 820px; margin: 40px auto; padding: 0 20px; line-height: 1.55; color: #1a1a1a; }
+  h1 { color: #1F4E79; border-bottom: 3px solid #1F4E79; padding-bottom: 10px; }
+  h2 { color: #1F4E79; margin-top: 40px; border-left: 4px solid #1F4E79; padding-left: 10px; }
+  h3 { color: #333; margin-top: 24px; }
+  code { font-family: Consolas, Menlo, monospace; background: #f2f2f2; padding: 2px 5px; border-radius: 3px; color: #9c2b00; font-size: 0.92em; }
+  pre { background: #f2f2f2; padding: 12px 16px; border-radius: 6px; overflow-x: auto; border-left: 3px solid #1F4E79; }
+  pre code { background: none; padding: 0; color: #1a1a1a; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+  th, td { border: 1px solid #ccc; padding: 8px 12px; text-align: left; }
+  th { background: #1F4E79; color: #fff; }
+  .note { background: #fff8e1; border-left: 4px solid #f5a623; padding: 10px 16px; margin: 16px 0; }
+  .status { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.85em; }
+  .status.pending { background: #eee; color: #666; }
+  #meta { font-size: 0.9em; color: #555; }
+  ul { padding-left: 22px; }
+</style>
+</head>
+<body>
+
+<!--
+CLAUDE-CONTEXT (for future study sessions):
+This file is a personal study log. It records what the user has already
+learned so a future assistant (e.g. Claude Code) can pick up where the
+session left off without re-teaching covered material. Topics in
+topics_pending were mentioned but NOT yet taught — treat topics_covered
+and topics_pending as ground truth for what to quiz or teach next.
+Source note: the roadmap is taken from the source session's own wrap-up
+lines ("TCP/IP, HTTP, TLS, DNS ... Next up: REST vs gRPC"). TCP/IP, HTTP
+and TLS were covered in earlier sessions, not in this file.
+-->
+<script type="application/json" id="claude-context">
+{
+  "subject": "Networking — DNS",
+  "session_date": "2026-09-23",
+  "learner_level": "not stated",
+  "roadmap": ["TCP/IP", "HTTP", "TLS", "DNS", "REST vs gRPC"],
+  "topics_covered": [
+    "DNS resolution hierarchy (resolver, root, TLD, authoritative)",
+    "TTL and caching",
+    "Record types (A, AAAA, CNAME, MX, TXT, NS, SOA)",
+    "Which records live at each level of the hierarchy",
+    "Glue records",
+    "Name servers: authoritative vs recursive resolver",
+    "Where name servers are hosted (anycast root/TLD, provider-hosted authoritative)",
+    "DNS transport and security (UDP/53, DNSSEC, DoH/DoT)"
+  ],
+  "topics_pending": ["REST vs gRPC"]
+}
+</script>
+
+<h1>DNS: Hierarchy, Records, and Name Servers</h1>
+<p id="meta">2026-09-23 &nbsp;|&nbsp; Networking roadmap: TCP/IP → HTTP → TLS → <strong>DNS</strong> → REST vs gRPC</p>
+
+<h2>Resolution Chain</h2>
+<p>DNS turns <code>example.com</code> into an IP; no single server knows everything, so the lookup is a chain of "ask someone who knows more".</p>
+<pre><code>Client/browser → Recursive resolver → Root server → .com TLD server → Authoritative server</code></pre>
+<ul>
+  <li>Root: "who handles .com?" → points to TLD servers</li>
+  <li>TLD: "who handles example.com?" → points to its name server</li>
+  <li>Authoritative: returns the actual IP</li>
+</ul>
+
+<h2>TTL and Caching</h2>
+<p>Resolver caches the answer for the record's TTL; repeat lookups skip the chain.</p>
+<div class="note">DNS changes "propagate" slowly because old cached answers linger until their TTL expires.</div>
+
+<h2>Record Types</h2>
+<table>
+  <tr><th>Record</th><th>Purpose</th></tr>
+  <tr><td>A</td><td>Name → IPv4 address</td></tr>
+  <tr><td>AAAA</td><td>Name → IPv6 address</td></tr>
+  <tr><td>CNAME</td><td>Alias one name to another (www.example.com → example.com)</td></tr>
+  <tr><td>MX</td><td>Where to deliver email for the domain</td></tr>
+  <tr><td>TXT</td><td>Arbitrary text — domain verification, SPF/DKIM</td></tr>
+  <tr><td>NS</td><td>Which servers are authoritative for the domain</td></tr>
+  <tr><td>SOA</td><td>Zone admin info: primary NS, contact, serial, default TTLs</td></tr>
+</table>
+
+<h2>Records Within the Hierarchy</h2>
+<p>Each level (root, .com, example.com) is a <strong>zone</strong> — just a set of records. What differs is which types live where.</p>
+<table>
+  <tr><th>Zone</th><th>Mostly stores</th></tr>
+  <tr><td>Root</td><td>NS records, one set per TLD ("who runs .com")</td></tr>
+  <tr><td>.com TLD</td><td>NS records, one set per registered domain ("who runs example.com")</td></tr>
+  <tr><td>example.com (authoritative)</td><td>A, AAAA, CNAME, MX, TXT — the real answers</td></tr>
+</table>
+<ul>
+  <li>Different record type = same walk, different question at the last hop (e.g. MX instead of A)</li>
+  <li>MX answer is a hostname (e.g. <code>mail.example.com</code>) → second lookup walks the hierarchy again to get its IP</li>
+</ul>
+<div class="note">Hierarchy = chain of NS delegations; A/MX/TXT only live at the zone that's authoritative for the name.</div>
+
+<h2>Glue Records</h2>
+<p>Solve the circularity when a domain's name server lives inside the domain (e.g. <code>ns1.example.com</code> for <code>example.com</code>).</p>
+<ul>
+  <li>TLD server stores the name server's IP alongside the NS delegation</li>
+  <li>Resolver gets the IP without a separate lookup</li>
+</ul>
+
+<h2>Structural Rules</h2>
+<ul>
+  <li>Exactly one SOA record per zone, at the apex — root, .com, and example.com each have their own</li>
+  <li>CNAME can't coexist with other records at the same name and can't sit at a zone apex → domain root is normally A/AAAA</li>
+</ul>
+
+<h2>Name Servers</h2>
+<p>Any server that answers DNS questions from stored zone records — root, TLD, and authoritative servers are all name servers.</p>
+<table>
+  <tr><th></th><th>Authoritative name server</th><th>Recursive resolver</th></tr>
+  <tr><td>Role</td><td>Holds the official records for a zone — source of truth</td><td>Walks root → TLD → authoritative on your behalf and caches the result</td></tr>
+  <tr><td>Authoritative for anything?</td><td>Yes, its zone</td><td>No</td></tr>
+  <tr><td>Examples</td><td>Cloudflare, Route 53, registrar-run</td><td>ISP resolver, 8.8.8.8, 1.1.1.1</td></tr>
+</table>
+<ul>
+  <li>A domain typically lists 2–4 NS records for redundancy — resolvers try the next if one is down</li>
+  <li>Owning a domain and running its name servers are separate; connected only by NS records</li>
+</ul>
+
+<h2>Where Name Servers Live</h2>
+<ul>
+  <li><strong>Root:</strong> 13 logical addresses (a–m.root-servers.net), run by 12 organizations; anycast puts the same IP at hundreds of locations → well over 1,500 physical instances</li>
+  <li><strong>TLD:</strong> run by the registry (Verisign for .com/.net, Public Interest Registry for .org); also anycast</li>
+  <li><strong>Authoritative:</strong> wherever the domain owner chose — registrar (GoDaddy, Namecheap), DNS provider (Cloudflare, Route 53, Google Cloud DNS), or self-hosted</li>
+</ul>
+<div class="note">Higher up the hierarchy = more standardized and globally replicated; lower down = wherever that company hosts its DNS.</div>
+
+<h2>Transport and Security</h2>
+<ul>
+  <li>UDP port 53 by default (no handshake); falls back to TCP for responses too big for one UDP packet</li>
+  <li><strong>DNSSEC:</strong> cryptographic signatures on records — integrity/authenticity only, no encryption</li>
+  <li><strong>DoH / DoT:</strong> encrypts the lookup itself; plain DNS is sent in the clear</li>
+</ul>
+
+<h2>Worked Example: www.example.com</h2>
+<ol>
+  <li>Laptop asks a recursive resolver</li>
+  <li>Resolver asks root → .com TLD → example.com's authoritative server</li>
+  <li>"What's the IP" = an A record lookup</li>
+  <li><code>www</code> is probably a CNAME to <code>example.com</code>, which then gets its own A lookup</li>
+  <li>Resolver caches the result for the TTL</li>
+  <li>Browser gets <code>93.184.216.34</code>, then continues with the HTTP/TLS/TCP flow</li>
+</ol>
+
+<h2>Up Next <span class="status pending">not yet covered</span></h2>
+<ul>
+  <li>REST vs gRPC</li>
+</ul>
+
+</body>
+</html>
